@@ -1,22 +1,73 @@
+import asyncio
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 
+from app.core.config import Config
+from app.middleware.s2s import TraceMiddleware
 from app.middleware.auth import AuthMiddleware
 from app.middleware.policy import PolicyMiddleware
-from app.middleware.s2s import S2SMiddleware
+from app.middleware.hpc import HPCMiddleware
+from app.middleware.audit import AuditMiddleware
 
 from app.services.iam_client import IAMClient
 from app.services.policy_client import PolicyClient
-from app.core.config import Config
+from app.services.hpc_policy_client import HPCPolicyClient
 
 from app.routes.gateway import router
 
-app = FastAPI(title="OmniBioAI API Gateway")
-
-iam = IAMClient(Config.IAM_URL)
+iam = IAMClient(Config.IAM_URL, Config.REDIS_URL)
 policy = PolicyClient(Config.POLICY_URL)
+hpc = HPCPolicyClient(Config.HPC_URL)
 
-app.add_middleware(AuthMiddleware, iam=iam)
+_invalidation_task: asyncio.Task | None = None
+
+
+async def _invalidation_loop():
+    """
+    Long-running task that subscribes to Redis "policy:invalidate" pub/sub.
+    On each message, evicts the IAM token cache entry so the next request
+    re-validates against the auth service (zero-trust: revoke = immediate effect).
+    Restarts automatically on failure.
+    """
+    async def on_invalidate(user_id: str, token: str):
+        if token:
+            await iam.evict(token)
+
+    while True:
+        try:
+            await iam.subscribe_invalidation(on_invalidate)
+        except Exception:
+            await asyncio.sleep(5)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _invalidation_task
+    _invalidation_task = asyncio.create_task(_invalidation_loop())
+    yield
+    if _invalidation_task:
+        _invalidation_task.cancel()
+        try:
+            await _invalidation_task
+        except asyncio.CancelledError:
+            pass
+
+
+app = FastAPI(title="OmniBioAI API Gateway", lifespan=lifespan)
+
+# Middleware is applied LIFO: last added = outermost = runs first for requests.
+# Desired request flow:
+#   TraceMiddleware → AuthMiddleware → PolicyMiddleware → HPCMiddleware → AuditMiddleware → handler
+app.add_middleware(AuditMiddleware)
+app.add_middleware(HPCMiddleware, hpc=hpc)
 app.add_middleware(PolicyMiddleware, policy=policy)
-app.add_middleware(S2SMiddleware)
+app.add_middleware(AuthMiddleware, iam=iam)
+app.add_middleware(TraceMiddleware)
 
 app.include_router(router)
+
+
+@app.get("/health")
+async def health():
+    return {"status": "ok"}

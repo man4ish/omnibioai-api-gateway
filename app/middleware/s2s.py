@@ -1,23 +1,18 @@
-import jwt
+import uuid
+
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse
-from app.core.config import Config
 
 
-class S2SMiddleware(BaseHTTPMiddleware):
+class TraceMiddleware(BaseHTTPMiddleware):
+    """
+    Outermost middleware. Generates or propagates X-Trace-Id.
+    Does NOT block external user requests — S2S validation is on downstream services.
+    """
 
     async def dispatch(self, request, call_next):
+        trace_id = request.headers.get("X-Trace-Id") or str(uuid.uuid4())
+        request.state.trace_id = trace_id
 
-        token = request.headers.get("X-Service-Token")
-
-        if not token:
-            return JSONResponse({"error": "missing service token"}, 401)
-
-        try:
-            payload = jwt.decode(token, Config.SERVICE_SECRET, algorithms=["HS256"])
-        except Exception:
-            return JSONResponse({"error": "invalid service token"}, 401)
-
-        request.state.service = payload.get("service")
-
-        return await call_next(request)
+        response = await call_next(request)
+        response.headers["X-Trace-Id"] = trace_id
+        return response
