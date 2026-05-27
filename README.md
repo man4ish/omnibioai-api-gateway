@@ -89,5 +89,8 @@ This is now equivalent to:
 > HPC + bioinformatics + AI workflows
 
 
+## License
+
+MIT (or your organization license)
 
 
