@@ -1,96 +1,200 @@
-# OmniBioAI API Gateway
+# omnibioai-api-gateway
 
-Central zero-trust entry point for the OmniBioAI ecosystem.
+**Zero-trust API gateway for the OmniBioAI platform.**
 
-## Responsibilities
-
-- Authentication (IAM validation)
-- Policy enforcement (RBAC / ABAC)
-- Service-to-service security (S2S)
-- Request routing
-- Audit-ready traffic control
+Single enforced entry point for all service traffic. Every request
+is authenticated, authorized, quota-checked, and audited before
+reaching any backend service.
 
 ---
 
 ## Architecture
 
-Client → Gateway → Services
+```
+Internet / Client / Studio
 
-Gateway enforces:
-- Identity
-- Policy
-- Security
-- Routing
+↓
+
+api-gateway :8080        ← single entry point
+
+↓
+
+TraceMiddleware          ← generates X-Trace-Id UUID
+
+↓
+
+AuthMiddleware           ← JWT validation via IAM client + Redis cache
+
+↓
+
+PolicyMiddleware         ← RBAC/ABAC via policy-engine
+
+↓
+
+HPCMiddleware            ← GPU/CPU quota via hpc-policy-engine
+
+↓
+
+AuditMiddleware          ← async audit log via security-audit
+
+↓
+
+target service           ← workbench / tes / toolserver / rag / lims
+```
+
+**Failure policy:**
+
+| Layer | On failure |
+|-------|-----------|
+| Auth | FAIL CLOSED → HTTP 401 |
+| Policy | FAIL CLOSED → HTTP 403 |
+| HPC quota | FAIL CLOSED → HTTP 403 |
+| Audit | FAIL OPEN → ignored |
 
 ---
 
 ## Features
 
-- JWT authentication
-- S2S token validation
-- Policy engine integration
-- Reverse proxy routing
-- Microservice isolation
+- JWT authentication via IAM client (Redis-cached, sub-ms validation)
+- RBAC/ABAC policy enforcement on every request
+- GPU/CPU quota governance for compute requests
+- Async audit logging via Redis Streams (never blocks requests)
+- Service-to-service (S2S) token validation
+- Distributed trace ID propagation (X-Trace-Id header)
+- Redis pub/sub cache invalidation on logout
+- Rate limiting on auth endpoints (via nginx — 10 req/min, burst 5)
 
 ---
 
-## Services Routed
+## Middleware Stack
 
-- Workbench
-- TES
-- Toolserver
-- Model Registry
-- RAG system
+Middleware is applied LIFO — last added runs first for requests:
+
+| Order | Middleware | Responsibility |
+|-------|-----------|----------------|
+| 1 | TraceMiddleware | Generate X-Trace-Id, attach to request state |
+| 2 | AuthMiddleware | Validate JWT via IAM client |
+| 3 | PolicyMiddleware | RBAC/ABAC authorization decision |
+| 4 | HPCMiddleware | GPU/CPU quota check (compute paths only) |
+| 5 | AuditMiddleware | Fire async audit event to Redis Streams |
 
 ---
 
-## Deployment
+## API Endpoints
 
+| Endpoint | Method | Auth | Description |
+|----------|--------|------|-------------|
+| `/health` | GET | — | Gateway health check |
+| `/auth/verify` | GET | JWT | Verify token (used by nginx auth_request) |
+| `/api/*` | ALL | JWT | Proxy to target service |
+
+### Health check
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8080
-````
+curl http://localhost:8080/health
+# {"status": "ok"}
+```
 
----
-
-## Security Model
-
-Zero Trust:
-
-* no direct service exposure
-* all traffic must pass gateway
-* every request is validated + audited
-
+### All other requests require JWT
+```bash
+curl -H "Authorization: Bearer <token>" \
+  http://localhost:8080/api/tools
 ```
 
 ---
 
-# 🧬 What you achieved now
+## Service Routing
 
-You now have:
-
-✔ IAM system  
-✔ Policy engine  
-✔ Audit system  
-✔ Security SDK  
-✔ API Gateway (NEW)
+| Path prefix | Target service |
+|-------------|----------------|
+| `/api/workbench/*` | workbench :8000 |
+| `/api/tes/*` | tes :8081 |
+| `/api/tools/*` | toolserver :9090 |
+| `/api/models/*` | model-registry :8095 |
+| `/api/rag/*` | rag :8096 |
+| `/api/lims/*` | lims :7000 |
 
 ---
 
-# 🚨 Result: You now have AWS-like architecture
+## Internal Headers Propagated
 
-This is now equivalent to:
+| Header | Description |
+|--------|-------------|
+| `X-Trace-Id` | UUID per request for distributed tracing |
+| `X-User-Id` | Authenticated user ID |
+| `X-Internal-Service` | Marks request as internal (gateway-verified) |
 
-- AWS API Gateway
-- IAM
-- CloudTrail
-- OPA policy layer
+---
 
-…but specialized for:
-> HPC + bioinformatics + AI workflows
+## Running
 
+### Via OmniBioAI Studio (recommended)
+
+```bash
+cd ~/Desktop/machine/omnibioai-studio
+docker compose up -d api-gateway
+```
+
+Access: `http://localhost:8080`
+
+### Environment variables
+
+Set in `omnibioai-studio/.env`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `IAM_URL` | `http://omnibioai-auth:8000` | Auth service URL |
+| `POLICY_URL` | `http://omnibioai-policy-engine:8001` | Policy engine URL |
+| `HPC_URL` | `http://omnibioai-hpc-policy-engine:8002` | HPC policy URL |
+| `REDIS_URL` | `redis://redis:6379` | Redis for token cache + pub/sub |
+| `JWT_SECRET` | — | JWT signing secret (auto-generated) |
+| `ROUTE_TIMEOUT` | `15` | Upstream request timeout (seconds) |
+
+---
+
+## Testing
+
+```bash
+cd ~/Desktop/machine/omnibioai-api-gateway
+pytest tests/ -v --cov=app
+
+# 33 tests passing
+# 74% coverage
+# Covers: auth middleware, policy middleware, HPC middleware,
+#         trace middleware, config, gateway router
+```
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|-----------|
+| Framework | FastAPI + Uvicorn |
+| Auth | IAM client (httpx async + Redis cache) |
+| Cache invalidation | Redis pub/sub |
+| Tracing | UUID trace IDs via middleware |
+| Proxying | httpx reverse proxy |
+
+---
+
+## Related Services
+
+| Service | Role |
+|---------|------|
+| `omnibioai-auth` | JWT issuance and validation |
+| `omnibioai-iam-client` | Async IAM client with Redis cache |
+| `omnibioai-policy-engine` | RBAC/ABAC authorization decisions |
+| `omnibioai-hpc-policy-engine` | GPU/CPU quota governance |
+| `omnibioai-security-audit` | Async audit event consumer |
+| `omnibioai-security-sdk` | SDK wrapping the full security stack |
+| `omnibioai-studio` | Manages gateway container lifecycle |
+
+---
 
 ## License
 
-MIT (or your organization license)
+Apache 2.0
 
+---
 
+*Part of the [OmniBioAI](https://github.com/man4ish/omnibioai-studio) platform.*
