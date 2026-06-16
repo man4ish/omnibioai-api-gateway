@@ -60,3 +60,24 @@ def test_policy_denial_without_reason(client, valid_user):
         )
     assert resp.status_code == 403
     assert resp.json().get("error") == "forbidden"
+
+
+def test_policy_middleware_no_user_returns_403():
+    """PolicyMiddleware must return 403 when request.state.user is absent."""
+    from starlette.applications import Starlette
+    from starlette.responses import PlainTextResponse
+    from starlette.routing import Route
+    from starlette.testclient import TestClient
+    from app.middleware.policy import PolicyMiddleware
+
+    async def dummy(request):
+        return PlainTextResponse("ok")
+
+    inner_app = Starlette(routes=[Route("/secure", dummy)])
+    inner_app.add_middleware(PolicyMiddleware, policy=AsyncMock())
+
+    with TestClient(inner_app, raise_server_exceptions=False) as c:
+        resp = c.get("/secure")
+
+    assert resp.status_code == 403
+    assert resp.json()["error"] == "forbidden"
